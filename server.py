@@ -6,7 +6,7 @@ import websockets
 connected_clients = set()
 
 # FIX: New websockets library (>=10.0) uses single argument — no "path" parameter
-async def audio_broker(websocket):
+async def audio_broker(websocket, path):
     connected_clients.add(websocket)
     print(f"🟢 Device connected! Total devices: {len(connected_clients)}", flush=True)
 
