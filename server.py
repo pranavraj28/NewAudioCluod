@@ -3,52 +3,57 @@ import os
 import websockets
 import http
 
+# This memory buffer will store your voice on the cloud!
+stored_audio = bytearray()
 connected_clients = set()
 
-# FIX 1: ONE argument only. This perfectly matches your updated library.
 async def audio_broker(websocket):
+    global stored_audio
     connected_clients.add(websocket)
-    print(f"🟢 Device connected! Total devices: {len(connected_clients)}", flush=True)
+    print(f"🟢 Device connected! Total: {len(connected_clients)}", flush=True)
 
     try:
         async for message in websocket:
-            if connected_clients:
-                others = [c for c in connected_clients if c != websocket]
-                if others:
-                    await asyncio.gather(
-                        *[client.send(message) for client in others],
-                        return_exceptions=True 
-                    )
+            
+            # 1. If we receive RAW BYTES (from Sender), store them in memory
+            if isinstance(message, bytes):
+                stored_audio.extend(message)
+                print(f"📥 Stored {len(message)} bytes. Total size: {len(stored_audio)}", flush=True)
+            
+            # 2. If we receive TEXT (from Receiver), check for the PLAY command
+            elif isinstance(message, str):
+                if message == "PLAY":
+                    if len(stored_audio) > 0:
+                        print(f"📤 Streaming {len(stored_audio)} bytes to Receiver!", flush=True)
+                        
+                        # Send in 4KB chunks so we don't crash the ESP32's RAM
+                        chunk_size = 4096
+                        for i in range(0, len(stored_audio), chunk_size):
+                            chunk = stored_audio[i:i+chunk_size]
+                            await websocket.send(chunk)
+                            await asyncio.sleep(0.05) # Pacing to prevent overflow
+                            
+                        print("✅ Playback finished.")
+                        # stored_audio.clear() # Optional: uncomment to delete audio after playing
+                    else:
+                        print("⚠️ Receiver requested PLAY, but no audio is stored.", flush=True)
+                        
     except websockets.exceptions.ConnectionClosedOK:
-        print("🔴 Device disconnected cleanly.", flush=True)
+        pass
     except Exception as e:
-        print(f"💥 Unexpected error: {e}", flush=True)
+        print(f"💥 Error: {e}", flush=True)
     finally:
         connected_clients.discard(websocket)
-        print(f"👥 Remaining devices: {len(connected_clients)}", flush=True)
 
-# FIX 2: This safely intercepts Render's health checks without crashing
 def health_check(connection, request):
-    # If Render is just pinging to see if the server is alive, say "OK"
     if getattr(request, "method", "") == "HEAD":
         return http.HTTPStatus.OK, [], b"OK\n"
-    # Otherwise, let the ESP32 connect normally
     return None 
 
 async def main():
     port = int(os.environ.get("PORT", 8765))
-    print(f"🚀 Cloud Audio Server starting on port {port}", flush=True)
-
-    async with websockets.serve(
-        audio_broker,
-        "0.0.0.0",
-        port,
-        ping_interval=20,
-        ping_timeout=10,
-        max_size=2 * 1024 * 1024,
-        process_request=health_check # Attaches the Render bypass
-    ):
-        print(f"✅ Server listening on port {port}", flush=True)
+    print(f"🚀 Voicemail Server starting on port {port}", flush=True)
+    async with websockets.serve(audio_broker, "0.0.0.0", port, ping_interval=20, ping_timeout=10, max_size=5*1024*1024, process_request=health_check):
         await asyncio.Future() 
 
 if __name__ == "__main__":
