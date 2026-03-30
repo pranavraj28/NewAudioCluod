@@ -3,7 +3,6 @@ import os
 import websockets
 import http
 
-# This memory buffer will store your voice on the cloud!
 stored_audio = bytearray()
 connected_clients = set()
 
@@ -20,22 +19,17 @@ async def audio_broker(websocket):
                 stored_audio.extend(message)
                 print(f"📥 Stored {len(message)} bytes. Total size: {len(stored_audio)}", flush=True)
             
-            # 2. If we receive TEXT (from Receiver), check for the PLAY command
+            # 2. If we receive TEXT, check for commands
             elif isinstance(message, str):
                 if message == "PLAY":
                     if len(stored_audio) > 0:
                         print(f"📤 Streaming {len(stored_audio)} bytes to Receiver!", flush=True)
                         
-                        # Send in 4KB chunks so we don't crash the ESP32's RAM
-                        chunk_size = 4096
-                        for i in range(0, len(stored_audio), chunk_size):
-                            chunk = stored_audio[i:i+chunk_size]
-                            await websocket.send(chunk)
-                            await asyncio.sleep(0.05) # Pacing to prevent overflow
-                            
-                        print("✅ Playback finished.")
+                        # Send the entire voicemail in one clean shot
+                        await websocket.send(stored_audio)
                         
-                        # FIX: Delete the voicemail after playing it so we don't hear old static!
+                        print("✅ Playback finished. Wiping memory clean.")
+                        # 🚨 THE FIX: Completely delete the old audio so it never plays again
                         stored_audio.clear() 
                     else:
                         print("⚠️ Receiver requested PLAY, but no audio is stored.", flush=True)
@@ -55,7 +49,9 @@ def health_check(connection, request):
 async def main():
     port = int(os.environ.get("PORT", 8765))
     print(f"🚀 Voicemail Server starting on port {port}", flush=True)
-    async with websockets.serve(audio_broker, "0.0.0.0", port, ping_interval=20, ping_timeout=10, max_size=5*1024*1024, process_request=health_check):
+    
+    # max_size increased to handle large one-shot downloads
+    async with websockets.serve(audio_broker, "0.0.0.0", port, ping_interval=20, ping_timeout=10, max_size=15*1024*1024, process_request=health_check):
         await asyncio.Future() 
 
 if __name__ == "__main__":
