@@ -1,60 +1,72 @@
 import asyncio
-import os
 import websockets
-import http
+import pyaudio
+import numpy as np
+import wave
+import os
+from datetime import datetime
 
-# This memory buffer will store your voice on the cloud!
-stored_audio = bytearray()
-connected_clients = set()
+# ── Config ────────────────────────────────────────────────────────
+SAMPLE_RATE = 16000
+SAMPLES_PER_PACKET = 320
+RENDER_URL = "wss://newaudiocluod.onrender.com"
 
-async def audio_broker(websocket):
-    global stored_audio
-    connected_clients.add(websocket)
-    print(f"🟢 Device connected! Total: {len(connected_clients)}", flush=True)
-
+async def play_voicemail():
+    print(f"🔌 Connecting to Cloud Voicemail: {RENDER_URL}...")
+    
+    # Setup WAV file saving
+    desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    wav_path = os.path.join(desktop, f"voicemail_{timestamp}.wav")
+    
+    wav_file = wave.open(wav_path, 'wb')
+    wav_file.setnchannels(1)
+    wav_file.setsampwidth(2)
+    wav_file.setframerate(SAMPLE_RATE)
+    
+    pa = pyaudio.PyAudio()
+    stream = pa.open(
+        format=pyaudio.paInt16,
+        channels=1,
+        rate=SAMPLE_RATE,
+        output=True,
+        frames_per_buffer=SAMPLES_PER_PACKET
+    )
+    
     try:
-        async for message in websocket:
+        # Increased max_size in case there's a large voicemail
+        async with websockets.connect(RENDER_URL, max_size=10*1024*1024) as websocket:
+            print("✅ Connected to Render!")
             
-            # 1. If we receive RAW BYTES (from Sender), store them in memory
-            if isinstance(message, bytes):
-                stored_audio.extend(message)
-                print(f"📥 Stored {len(message)} bytes. Total size: {len(stored_audio)}", flush=True)
+            # Act like the Receiver ESP32 button: Send the PLAY command
+            print("▶️ Asking server for the stored audio...")
+            await websocket.send("PLAY")
             
-            # 2. If we receive TEXT (from Receiver), check for the PLAY command
-            elif isinstance(message, str):
-                if message == "PLAY":
-                    if len(stored_audio) > 0:
-                        print(f"📤 Streaming {len(stored_audio)} bytes to Receiver!", flush=True)
+            print("🔊 Listening for playback...")
+            while True:
+                try:
+                    # Wait for audio chunks. Timeout if the server stops sending.
+                    packet = await asyncio.wait_for(websocket.recv(), timeout=2.0)
+                    
+                    if isinstance(packet, bytes):
+                        samples = np.frombuffer(packet, dtype=np.int16)
+                        samples = samples.byteswap() # Keep the Endianness fix!
                         
-                        # Send in 4KB chunks so we don't crash the ESP32's RAM
-                        chunk_size = 4096
-                        for i in range(0, len(stored_audio), chunk_size):
-                            chunk = stored_audio[i:i+chunk_size]
-                            await websocket.send(chunk)
-                            await asyncio.sleep(0.05) # Pacing to prevent overflow
-                            
-                        print("✅ Playback finished.")
-                        # stored_audio.clear() # Optional: delete audio after playing
-                    else:
-                        print("⚠️ Receiver requested PLAY, but no audio is stored.", flush=True)
+                        # Play it AND save it
+                        stream.write(samples.tobytes())
+                        wav_file.writeframes(samples.tobytes())
                         
-    except websockets.exceptions.ConnectionClosedOK:
-        pass
+                except asyncio.TimeoutError:
+                    print(f"\n✅ Playback finished. Saved to: {wav_path}")
+                    break 
+                    
     except Exception as e:
-        print(f"💥 Error: {e}", flush=True)
+        print(f"\n❌ Error: {e}")
     finally:
-        connected_clients.discard(websocket)
-
-def health_check(connection, request):
-    if getattr(request, "method", "") == "HEAD":
-        return http.HTTPStatus.OK, [], b"OK\n"
-    return None 
-
-async def main():
-    port = int(os.environ.get("PORT", 8765))
-    print(f"🚀 Voicemail Server starting on port {port}", flush=True)
-    async with websockets.serve(audio_broker, "0.0.0.0", port, ping_interval=20, ping_timeout=10, max_size=5*1024*1024, process_request=health_check):
-        await asyncio.Future() 
+        stream.stop_stream()
+        stream.close()
+        pa.terminate()
+        wav_file.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(play_voicemail())
