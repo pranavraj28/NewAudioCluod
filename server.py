@@ -25,14 +25,19 @@ async def audio_broker(websocket):
                     if len(stored_audio) > 0:
                         print(f"📤 Streaming {len(stored_audio)} bytes to Receiver!", flush=True)
                         
-                        # Send the entire voicemail in one clean shot
+                        # Send the entire voicemail
                         await websocket.send(stored_audio)
                         
-                        print("✅ Playback finished. Wiping memory clean.")
-                        # 🚨 THE FIX: Completely delete the old audio so it never plays again
-                        stored_audio.clear() 
+                        print("✅ Playback sent. Keeping memory intact for alarm looping.")
+                        # 🚨 CHANGE: We no longer clear the memory here!
                     else:
                         print("⚠️ Receiver requested PLAY, but no audio is stored.", flush=True)
+                
+                # 3. New ACK command to stop the alarm
+                elif message == "ACK":
+                    print("✅ Receiver acknowledged alarm. Wiping memory clean.", flush=True)
+                    # 🚨 THE FIX: Only delete the audio when the user presses the Receiver button
+                    stored_audio.clear()
                         
     except websockets.exceptions.ConnectionClosedOK:
         pass
